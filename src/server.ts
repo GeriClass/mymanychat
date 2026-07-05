@@ -1,17 +1,32 @@
 import { createWorkersAI } from "workers-ai-provider";
 import { callable, routeAgentRequest, type Schedule } from "agents";
-import { getSchedulePrompt, scheduleSchema } from "agents/schedule";
 import { AIChatAgent, type OnChatMessageOptions } from "@cloudflare/ai-chat";
 import {
   convertToModelMessages,
+  generateText,
   pruneMessages,
   stepCountIs,
-  streamText,
-  tool
+  streamText
 } from "ai";
-import { z } from "zod";
+import { buildSystemPrompt } from "./prompts";
+import { clientTools, createAutomationTools } from "./tools";
 
-export class ChatAgent extends AIChatAgent<Env> {
+// Modelo aberto no Workers AI com bom suporte a tool-calling.
+// Alternativa: "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+const MODEL = "@cf/moonshotai/kimi-k2.6";
+
+export type TaskLogEntry = {
+  description: string;
+  result: string;
+  at: string;
+};
+
+export type AgentState = {
+  taskLog: TaskLogEntry[];
+};
+
+export class ChatAgent extends AIChatAgent<Env, AgentState> {
+  initialState: AgentState = { taskLog: [] };
   maxPersistedMessages = 100;
   chatRecovery = true;
 
@@ -48,152 +63,65 @@ export class ChatAgent extends AIChatAgent<Env> {
     const workersai = createWorkersAI({ binding: this.env.AI });
 
     const result = streamText({
-      model: workersai("@cf/moonshotai/kimi-k2.6", {
+      model: workersai(MODEL, {
         sessionAffinity: this.sessionAffinity
       }),
-      system: `You are a helpful assistant that can understand images. You can check the weather, get the user's timezone, run calculations, and schedule tasks. When users share images, describe what you see and answer questions about them.
-
-${getSchedulePrompt({ date: new Date() })}
-
-If the user asks to schedule a task, use the schedule tool to schedule the task.`,
+      system: buildSystemPrompt(),
       // Prune old tool calls to save tokens on long conversations
       messages: pruneMessages({
         messages: await convertToModelMessages(this.messages),
         toolCalls: "before-last-2-messages"
       }),
       tools: {
-        // MCP tools from connected servers
         ...mcpTools,
-
-        // Server-side tool: runs automatically on the server
-        getWeather: tool({
-          description: "Get the current weather for a city",
-          inputSchema: z.object({
-            city: z.string().describe("City name")
-          }),
-          execute: async ({ city }) => {
-            // Replace with a real weather API in production
-            const conditions = ["sunny", "cloudy", "rainy", "snowy"];
-            const temp = Math.floor(Math.random() * 30) + 5;
-            return {
-              city,
-              temperature: temp,
-              condition:
-                conditions[Math.floor(Math.random() * conditions.length)],
-              unit: "celsius"
-            };
-          }
-        }),
-
-        // Client-side tool: no execute function — the browser handles it
-        getUserTimezone: tool({
-          description:
-            "Get the user's timezone from their browser. Use this when you need to know the user's local time.",
-          inputSchema: z.object({})
-        }),
-
-        // Approval tool: requires user confirmation before executing
-        calculate: tool({
-          description:
-            "Perform a math calculation with two numbers. Requires user approval for large numbers.",
-          inputSchema: z.object({
-            a: z.number().describe("First number"),
-            b: z.number().describe("Second number"),
-            operator: z
-              .enum(["+", "-", "*", "/", "%"])
-              .describe("Arithmetic operator")
-          }),
-          needsApproval: async ({ a, b }) =>
-            Math.abs(a) > 1000 || Math.abs(b) > 1000,
-          execute: async ({ a, b, operator }) => {
-            const ops: Record<string, (x: number, y: number) => number> = {
-              "+": (x, y) => x + y,
-              "-": (x, y) => x - y,
-              "*": (x, y) => x * y,
-              "/": (x, y) => x / y,
-              "%": (x, y) => x % y
-            };
-            if (operator === "/" && b === 0) {
-              return { error: "Division by zero" };
-            }
-            return {
-              expression: `${a} ${operator} ${b}`,
-              result: ops[operator](a, b)
-            };
-          }
-        }),
-
-        scheduleTask: tool({
-          description:
-            "Schedule a task to be executed at a later time. Use this when the user asks to be reminded or wants something done later.",
-          inputSchema: scheduleSchema,
-          execute: async ({ when, description }) => {
-            if (when.type === "no-schedule") {
-              return "Not a valid schedule input";
-            }
-            const input =
-              when.type === "scheduled"
-                ? when.date
-                : when.type === "delayed"
-                  ? when.delayInSeconds
-                  : when.type === "cron"
-                    ? when.cron
-                    : null;
-            if (!input) return "Invalid schedule type";
-            try {
-              this.schedule(input, "executeTask", description, {
-                idempotent: true
-              });
-              return `Task scheduled: "${description}" (${when.type}: ${input})`;
-            } catch (error) {
-              return `Error scheduling task: ${error}`;
-            }
-          }
-        }),
-
-        getScheduledTasks: tool({
-          description: "List all tasks that have been scheduled",
-          inputSchema: z.object({}),
-          execute: async () => {
-            const tasks = this.getSchedules();
-            return tasks.length > 0 ? tasks : "No scheduled tasks found.";
-          }
-        }),
-
-        cancelScheduledTask: tool({
-          description: "Cancel a scheduled task by its ID",
-          inputSchema: z.object({
-            taskId: z.string().describe("The ID of the task to cancel")
-          }),
-          execute: async ({ taskId }) => {
-            try {
-              this.cancelSchedule(taskId);
-              return `Task ${taskId} cancelled.`;
-            } catch (error) {
-              return `Error cancelling task: ${error}`;
-            }
-          }
-        })
+        ...createAutomationTools(this),
+        ...clientTools
       },
-      stopWhen: stepCountIs(5),
+      stopWhen: stepCountIs(8),
       abortSignal: options?.abortSignal
     });
 
     return result.toUIMessageStreamResponse();
   }
 
+  /**
+   * Executa uma tarefa agendada usando o próprio LLM com as ferramentas de
+   * automação — assim "todo dia às 8h, consulte X e me avise" funciona de
+   * verdade, e não apenas como lembrete.
+   */
   async executeTask(description: string, _task: Schedule<string>) {
-    // Do the actual work here (send email, call API, etc.)
-    console.log(`Executing scheduled task: ${description}`);
+    const workersai = createWorkersAI({ binding: this.env.AI });
+    let resultText: string;
+    try {
+      const { text } = await generateText({
+        model: workersai(MODEL),
+        system: buildSystemPrompt(
+          "Você está executando uma tarefa agendada agora. Execute-a usando as ferramentas disponíveis e responda com um resumo curto do resultado."
+        ),
+        prompt: `Tarefa agendada: ${description}`,
+        tools: createAutomationTools(this),
+        stopWhen: stepCountIs(8)
+      });
+      resultText = text || "(tarefa executada sem resposta em texto)";
+    } catch (error) {
+      resultText = `Erro ao executar a tarefa: ${error}`;
+    }
 
-    // Notify connected clients via a broadcast event.
-    // We use broadcast() instead of saveMessages() to avoid injecting
-    // into chat history — that would cause the AI to see the notification
-    // as new context and potentially loop.
+    this.setState({
+      ...this.state,
+      taskLog: [
+        ...this.state.taskLog,
+        { description, result: resultText, at: new Date().toISOString() }
+      ].slice(-50)
+    });
+
+    // Notifica clientes conectados via broadcast em vez de saveMessages()
+    // para não injetar a notificação no histórico do chat (evita loops da IA).
     this.broadcast(
       JSON.stringify({
         type: "scheduled-task",
         description,
+        result: resultText,
         timestamp: new Date().toISOString()
       })
     );

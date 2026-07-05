@@ -3,7 +3,7 @@ import { useAgent } from "agents/react";
 import { useAgentChat } from "@cloudflare/ai-chat/react";
 import { getToolName, isToolUIPart, type UIMessage } from "ai";
 import type { MCPServersState } from "agents";
-import type { ChatAgent } from "./server";
+import type { AgentState, ChatAgent, TaskLogEntry } from "./server";
 import {
   Badge,
   Button,
@@ -22,6 +22,7 @@ import {
   TrashIcon,
   GearIcon,
   ChatCircleDotsIcon,
+  ListChecksIcon,
   CircleIcon,
   MoonIcon,
   SunIcon,
@@ -118,7 +119,7 @@ function ToolPartView({
             <Text size="xs" variant="secondary" bold>
               {toolName}
             </Text>
-            <Badge variant="secondary">Done</Badge>
+            <Badge variant="secondary">Concluído</Badge>
           </div>
           <div className="font-mono">
             <Text size="xs" variant="secondary">
@@ -139,7 +140,7 @@ function ToolPartView({
           <div className="flex items-center gap-2 mb-2">
             <GearIcon size={14} className="text-kumo-warning" />
             <Text size="sm" bold>
-              Approval needed: {toolName}
+              Aprovação necessária: {toolName}
             </Text>
           </div>
           <div className="font-mono mb-3">
@@ -158,7 +159,7 @@ function ToolPartView({
                 }
               }}
             >
-              Approve
+              Aprovar
             </Button>
             <Button
               variant="secondary"
@@ -170,7 +171,7 @@ function ToolPartView({
                 }
               }}
             >
-              Reject
+              Rejeitar
             </Button>
           </div>
         </Surface>
@@ -192,7 +193,7 @@ function ToolPartView({
             <Text size="xs" variant="secondary" bold>
               {toolName}
             </Text>
-            <Badge variant="secondary">Rejected</Badge>
+            <Badge variant="secondary">Rejeitado</Badge>
           </div>
         </Surface>
       </div>
@@ -207,7 +208,7 @@ function ToolPartView({
           <div className="flex items-center gap-2">
             <GearIcon size={14} className="text-kumo-inactive animate-spin" />
             <Text size="xs" variant="secondary">
-              Running {toolName}...
+              Executando {toolName}...
             </Text>
           </div>
         </Surface>
@@ -241,8 +242,11 @@ function Chat() {
   const [mcpUrl, setMcpUrl] = useState("");
   const [isAddingServer, setIsAddingServer] = useState(false);
   const mcpPanelRef = useRef<HTMLDivElement>(null);
+  const [taskLog, setTaskLog] = useState<TaskLogEntry[]>([]);
+  const [showTaskPanel, setShowTaskPanel] = useState(false);
+  const taskPanelRef = useRef<HTMLDivElement>(null);
 
-  const agent = useAgent<ChatAgent>({
+  const agent = useAgent<ChatAgent, AgentState>({
     agent: "ChatAgent",
     onOpen: useCallback(() => setConnected(true), []),
     onClose: useCallback(() => setConnected(false), []),
@@ -253,14 +257,19 @@ function Chat() {
     onMcpUpdate: useCallback((state: MCPServersState) => {
       setMcpState(state);
     }, []),
+    onStateUpdate: useCallback((state: AgentState) => {
+      setTaskLog(state?.taskLog ?? []);
+    }, []),
     onMessage: useCallback(
       (message: MessageEvent) => {
         try {
           const data = JSON.parse(String(message.data));
           if (data.type === "scheduled-task") {
             toasts.add({
-              title: "Scheduled task completed",
-              description: data.description,
+              title: "Tarefa agendada executada",
+              description: data.result
+                ? `${data.description} — ${data.result}`
+                : data.description,
               timeout: 0
             });
           }
@@ -286,6 +295,21 @@ function Chat() {
     document.addEventListener("mousedown", handleClickOutside);
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, [showMcpPanel]);
+
+  // Close task panel when clicking outside
+  useEffect(() => {
+    if (!showTaskPanel) return;
+    function handleClickOutside(e: MouseEvent) {
+      if (
+        taskPanelRef.current &&
+        !taskPanelRef.current.contains(e.target as Node)
+      ) {
+        setShowTaskPanel(false);
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, [showTaskPanel]);
 
   const handleAddServer = async () => {
     if (!mcpName.trim() || !mcpUrl.trim()) return;
@@ -441,7 +465,7 @@ function Chat() {
           <div className="flex flex-col items-center gap-2 text-kumo-brand">
             <ImageIcon size={40} />
             <Text variant="heading3" as="span">
-              Drop images here
+              Solte as imagens aqui
             </Text>
           </div>
         </div>
@@ -452,11 +476,11 @@ function Chat() {
         <div className="max-w-3xl mx-auto flex items-center justify-between">
           <div className="flex items-center gap-3">
             <h1 className="text-lg font-semibold text-kumo-default">
-              <span className="mr-2">⛅</span>Agent Starter
+              <span className="mr-2">⚙️</span>MyManyChat
             </h1>
             <Badge variant="secondary">
               <ChatCircleDotsIcon size={12} weight="bold" className="mr-1" />
-              AI Chat
+              Agente de Automação
             </Badge>
           </div>
           <div className="flex items-center gap-3">
@@ -467,7 +491,7 @@ function Chat() {
                 className={connected ? "text-kumo-success" : "text-kumo-danger"}
               />
               <Text size="xs" variant="secondary">
-                {connected ? "Connected" : "Disconnected"}
+                {connected ? "Conectado" : "Desconectado"}
               </Text>
             </div>
             <div className="flex items-center gap-1.5">
@@ -480,6 +504,78 @@ function Chat() {
               />
             </div>
             <ThemeToggle />
+            <div className="relative" ref={taskPanelRef}>
+              <Button
+                variant="secondary"
+                icon={<ListChecksIcon size={16} />}
+                onClick={() => setShowTaskPanel(!showTaskPanel)}
+              >
+                Tarefas
+                {taskLog.length > 0 && (
+                  <Badge variant="primary" className="ml-1.5">
+                    {taskLog.length}
+                  </Badge>
+                )}
+              </Button>
+
+              {/* Executed tasks dropdown panel */}
+              {showTaskPanel && (
+                <div className="absolute right-0 top-full mt-2 w-96 z-50">
+                  <Surface className="rounded-xl ring ring-kumo-line shadow-lg p-4 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <ListChecksIcon
+                          size={16}
+                          className="text-kumo-accent"
+                        />
+                        <Text size="sm" bold>
+                          Tarefas executadas
+                        </Text>
+                      </div>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        shape="square"
+                        aria-label="Fechar painel de tarefas"
+                        icon={<XIcon size={14} />}
+                        onClick={() => setShowTaskPanel(false)}
+                      />
+                    </div>
+                    {taskLog.length === 0 ? (
+                      <Text size="xs" variant="secondary">
+                        Nenhuma tarefa executada ainda. Peça algo como "me
+                        lembre em 5 minutos" ou agende uma automação.
+                      </Text>
+                    ) : (
+                      <div className="space-y-2 max-h-72 overflow-y-auto">
+                        {[...taskLog].reverse().map((entry, i) => (
+                          <div
+                            key={`${entry.at}-${i}`}
+                            className="p-2.5 rounded-lg border border-kumo-line space-y-1"
+                          >
+                            <div className="flex items-center gap-2">
+                              <CheckCircleIcon
+                                size={14}
+                                className="text-kumo-success shrink-0"
+                              />
+                              <span className="text-sm font-medium text-kumo-default">
+                                {entry.description}
+                              </span>
+                            </div>
+                            <span className="text-xs text-kumo-subtle whitespace-pre-wrap block">
+                              {entry.result}
+                            </span>
+                            <span className="text-[11px] text-kumo-inactive block">
+                              {new Date(entry.at).toLocaleString("pt-BR")}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </Surface>
+                </div>
+              )}
+            </div>
             <div className="relative" ref={mcpPanelRef}>
               <Button
                 variant="secondary"
@@ -652,7 +748,7 @@ function Chat() {
               icon={<TrashIcon size={16} />}
               onClick={clearHistory}
             >
-              Clear
+              Limpar
             </Button>
           </div>
         </div>
@@ -664,14 +760,14 @@ function Chat() {
           {messages.length === 0 && (
             <Empty
               icon={<ChatCircleDotsIcon size={32} />}
-              title="Start a conversation"
+              title="Comece uma automação"
               contents={
                 <div className="flex flex-wrap justify-center gap-2">
                   {[
-                    "What's the weather in Paris?",
-                    "What timezone am I in?",
-                    "Calculate 5000 * 3",
-                    "Remind me in 5 minutes to take a break"
+                    "Me lembre em 5 minutos de fazer uma pausa",
+                    "Liste minhas tarefas agendadas",
+                    "Faça um GET em https://api.github.com/zen e me mostre o resultado",
+                    "Todo dia às 8h, busque a cotação do dólar e me avise"
                   ].map((prompt) => (
                     <Button
                       key={prompt}
@@ -735,15 +831,15 @@ function Chat() {
                           <summary className="flex items-center gap-2 cursor-pointer px-3 py-2 rounded-lg bg-purple-500/10 border border-purple-500/20 text-sm select-none">
                             <BrainIcon size={14} className="text-purple-400" />
                             <span className="font-medium text-kumo-default">
-                              Reasoning
+                              Raciocínio
                             </span>
                             {isDone ? (
                               <span className="text-xs text-kumo-success">
-                                Complete
+                                Concluído
                               </span>
                             ) : (
                               <span className="text-xs text-kumo-brand">
-                                Thinking...
+                                Pensando...
                               </span>
                             )}
                             <CaretDownIcon
@@ -897,8 +993,8 @@ function Chat() {
               onPaste={handlePaste}
               placeholder={
                 attachments.length > 0
-                  ? "Add a message or send images..."
-                  : "Send a message..."
+                  ? "Adicione uma mensagem ou envie as imagens..."
+                  : "O que você quer automatizar?"
               }
               disabled={!connected || isStreaming}
               rows={1}
@@ -940,7 +1036,7 @@ export default function App() {
       <Suspense
         fallback={
           <div className="flex items-center justify-center h-screen text-kumo-inactive">
-            Loading...
+            Carregando...
           </div>
         }
       >
