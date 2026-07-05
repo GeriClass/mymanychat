@@ -1,0 +1,88 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Conta do Instagram conectada via OAuth (API com Login do Instagram)
+model InstagramAccount {
+  id             String    @id @default(cuid())
+  igUserId       String    @unique // ID do usuário na API do Instagram
+  username       String
+  accessToken    String // token de longa duração (60 dias)
+  tokenExpiresAt DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  automations   Automation[]
+  conversations Conversation[]
+}
+
+// Uma regra de automação: gatilho -> resposta
+model Automation {
+  id        String           @id @default(cuid())
+  accountId String
+  account   InstagramAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  name    String
+  // DM_KEYWORD  = mensagem recebida contém palavra-chave -> responde por DM
+  // COMMENT     = comentário em post contém palavra-chave -> responde o comentário e/ou manda DM
+  // WELCOME     = primeira mensagem de um contato novo -> responde por DM
+  trigger String
+
+  // Palavras-chave separadas por vírgula. Vazio = qualquer mensagem/comentário.
+  keywords  String @default("")
+  // CONTAINS = a palavra aparece no texto | EXACT = o texto é exatamente a palavra
+  matchType String @default("CONTAINS")
+
+  // DM enviada quando o gatilho dispara
+  replyText String
+  // Resposta pública ao comentário (apenas para trigger COMMENT; opcional)
+  commentReply String?
+
+  isActive Boolean @default(true)
+  runCount Int     @default(0)
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  messages  Message[]
+}
+
+model Conversation {
+  id        String           @id @default(cuid())
+  accountId String
+  account   InstagramAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  igSenderId     String // ID do contato no Instagram
+  senderUsername String?
+  lastMessageAt  DateTime @default(now())
+  createdAt      DateTime @default(now())
+
+  messages Message[]
+
+  @@unique([accountId, igSenderId])
+}
+
+model Message {
+  id             String       @id @default(cuid())
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  direction    String // IN = recebida | OUT = enviada
+  text         String
+  igMessageId  String?     @unique // para deduplicar eventos de webhook reentregues
+  automationId String?
+  automation   Automation? @relation(fields: [automationId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+}
+
+// Registro bruto de eventos de webhook (útil para depurar a integração)
+model WebhookEvent {
+  id        String   @id @default(cuid())
+  payload   String
+  createdAt DateTime @default(now())
+}
