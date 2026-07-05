@@ -142,5 +142,4 @@ dist
 .wrangler
 .dev.vars
 
-env.d.ts
 .claude/
