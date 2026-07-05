@@ -14,7 +14,7 @@ comentários automaticamente usando a **API oficial do Instagram** (Meta).
 ## Stack
 
 - [Next.js 15](https://nextjs.org) (App Router) + TypeScript
-- [Prisma](https://prisma.io) + SQLite (troque a `DATABASE_URL` para usar Postgres/MySQL)
+- [Prisma](https://prisma.io) + PostgreSQL (funciona com [Neon](https://neon.tech) gratuito)
 - Instagram Platform API (API com Login do Instagram)
 
 ## Rodando localmente
@@ -22,9 +22,23 @@ comentários automaticamente usando a **API oficial do Instagram** (Meta).
 ```bash
 npm install
 cp .env.example .env      # preencha as variáveis (veja abaixo)
-npm run db:push           # cria o banco SQLite
+npm run db:push           # cria as tabelas no Postgres
 npm run dev               # http://localhost:3000
 ```
+
+> O banco é PostgreSQL — crie um gratuito em [neon.tech](https://neon.tech) em
+> 1 minuto e cole a connection string em `DATABASE_URL`.
+
+## Deploy no Vercel
+
+1. Crie um banco Postgres gratuito ([neon.tech](https://neon.tech) ou aba
+   **Storage** do Vercel) e copie a connection string (versão *pooled*).
+2. Em [vercel.com/new](https://vercel.com/new), importe este repositório.
+3. Em **Environment Variables**, adicione `DATABASE_URL`, `APP_URL`
+   (a URL do próprio deploy, ex. `https://mymanychat.vercel.app`),
+   `INSTAGRAM_APP_ID`, `INSTAGRAM_APP_SECRET` e `WEBHOOK_VERIFY_TOKEN`.
+4. Deploy — o build roda `prisma db push` e cria as tabelas sozinho.
+5. Use a URL do deploy no painel da Meta (callback OAuth e webhook).
 
 ## Configuração na Meta (obrigatória)
 
@@ -54,7 +68,7 @@ A automação usa a API oficial, então você precisa de:
 
 | Variável | Descrição |
 | --- | --- |
-| `DATABASE_URL` | Conexão do banco (padrão: SQLite local) |
+| `DATABASE_URL` | Connection string do PostgreSQL |
 | `APP_URL` | URL pública do app (HTTPS) |
 | `INSTAGRAM_APP_ID` | ID do app do Instagram na Meta |
 | `INSTAGRAM_APP_SECRET` | Chave secreta do app (também valida a assinatura dos webhooks) |
